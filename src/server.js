@@ -39,6 +39,37 @@ export async function bindEvent(client) {
   log(`Подписка ${EVENT} → ${handler} создана`);
 }
 
+// Сохраняет токены из запроса установки/открытия приложения. Токен предварительно
+// проверяется вызовом app.info на портале из конфигурации, чтобы поддельный
+// POST не мог подменить авторизацию.
+async function saveAuth(body, tokens) {
+  const auth = body.auth || {};
+  const accessToken = body.AUTH_ID || auth.access_token;
+  if (!accessToken) return false;
+  const endpoint = `https://${config.domain}/rest/`;
+  try {
+    const res = await fetch(`${endpoint}app.info.json?auth=${encodeURIComponent(accessToken)}`);
+    const info = await res.json();
+    if (!info.result) {
+      log('Отклонены токены: app.info вернул', info.error || res.status);
+      return false;
+    }
+  } catch (e) {
+    log('Не удалось проверить токены:', e.message);
+    return false;
+  }
+  tokens.save({
+    access_token: accessToken,
+    refresh_token: body.REFRESH_ID || auth.refresh_token,
+    member_id: body.member_id || auth.member_id,
+    domain: config.domain,
+    client_endpoint: endpoint,
+    ...(auth.application_token ? { application_token: auth.application_token } : {}),
+  });
+  log('Токены приложения сохранены');
+  return true;
+}
+
 // Сделки обрабатываются последовательно, повторное событие по той же сделке
 // дожидается завершения предыдущего (productrows.set сам порождает OnCrmDealUpdate).
 const queues = new Map();
@@ -69,21 +100,10 @@ export function createServer({ client, tokens }) {
       // Установка локального приложения: Б24 открывает обработчик установки
       // с AUTH_ID/REFRESH_ID в теле и DOMAIN/member_id в query/теле.
       if (url.pathname === '/install') {
-        const auth = body.auth || {};
-        const accessToken = body.AUTH_ID || auth.access_token;
-        if (!accessToken) {
+        if (!(await saveAuth(body, tokens))) {
           res.writeHead(400);
-          return res.end('No auth data');
+          return res.end('No valid auth data');
         }
-        const domain = url.searchParams.get('DOMAIN') || auth.domain || config.domain;
-        tokens.save({
-          access_token: accessToken,
-          refresh_token: body.REFRESH_ID || auth.refresh_token,
-          member_id: body.member_id || auth.member_id,
-          domain,
-          client_endpoint: auth.client_endpoint || `https://${domain}/rest/`,
-          ...(auth.application_token ? { application_token: auth.application_token } : {}),
-        });
         let status = 'ok';
         try {
           await bindEvent(client);
@@ -101,6 +121,16 @@ export function createServer({ client, tokens }) {
       if (url.pathname === '/handler') {
         const event = String(body.event || '').toUpperCase();
         const appToken = body.auth?.application_token;
+
+        // Открытие приложения в портале: сохраняем свежие токены (после
+        // передеплоя data/ пуст — достаточно открыть приложение в Б24).
+        if (!event && body.AUTH_ID) {
+          const ok = await saveAuth(body, tokens);
+          res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(ok
+            ? '<!doctype html><meta charset="utf-8"><p>SKU-синхронизация работает. Токены обновлены.</p>'
+            : 'No valid auth data');
+        }
 
         // ONAPPINSTALL приходит с application_token — запоминаем его для проверки событий.
         if (event === 'ONAPPINSTALL' && appToken) {

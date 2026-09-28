@@ -38,6 +38,10 @@ npm test                  # тесты
    и создаётся подписка на `ONCRMDEALUPDATE` → `PUBLIC_URL/handler`.
 
 Если `PUBLIC_URL` изменился, переподпишитесь командой `npm run bind`.
+
+Токены хранятся в `data/auth.json` (путь меняется переменной `DATA_DIR`). Если после
+передеплоя папка очистилась, достаточно открыть приложение в Б24: обработчик сохранит
+свежие токены. Перед сохранением любой токен проверяется запросом `app.info` к порталу.
 Проверить одну сделку вручную: `npm run sync -- <ID сделки>`.
 
 ## Настройка каталога
@@ -61,6 +65,26 @@ npm test                  # тесты
 - `vibe` — шлюз Вайбкод (`VIBE_API_URL`, `VIBE_API_KEY`, заголовок `VIBE_AUTH_HEADER`).
   URL запроса строится как `VIBE_API_URL/<метод>`. **Этот формат не сверен с документацией
   Вайбкода**, при необходимости поправьте `endpoint()` в `src/b24client.js`.
+
+## Деплой на VibeCode
+
+```bash
+curl -X POST "https://vibecode.bitrix24.tech/v1/infra/servers/<SERVER_ID>/deploy" \
+  -H "X-Api-Key: $VIBE_KEY" -H "Content-Type: application/json" \
+  -H "X-Skip-Source-Snapshot: deploy from GitHub branch" \
+  -d '{
+    "displayName": "SKU Sync",
+    "description": "Синхронизация товаров сделок с каталогом по артикулу",
+    "source": { "url": "https://codeload.github.com/alexneoline/Clodb24/tar.gz/refs/heads/claude/bitrix24-product-sync-app-7li0mn" },
+    "runtime": "node20",
+    "start": "cd /opt/app && node src/server.js",
+    "port": 3000,
+    "env": { "PUBLIC_URL": "https://<субдомен>.vibecode.bitrix24.tech", "B24_CLIENT_ID": "...", "B24_CLIENT_SECRET": "...", "CATALOG_IBLOCK_IDS": "...", "SKU_FIELD": "..." }
+  }'
+```
+
+При обновлении добавьте `"changelog"`. Автосон отключается через
+`PATCH /v1/infra/servers/<SERVER_ID>/sleep` с `{"sleepAfterMinutes": null}`: иначе события Б24 могут приходить к спящему серверу.
 
 ## Безопасность
 
