@@ -36,7 +36,7 @@ export const config = {
     .split(',')
     .map((s) => Number(s.trim()))
     .filter(Boolean),
-  skuField: env.SKU_FIELD || 'property105',
+  skuField: env.SKU_FIELD || '',
   skuRegex: new RegExp(env.SKU_REGEX || '\\[(SKU-[A-Za-z0-9._\\/-]+)\\]', 'i'),
   dataDir: env.DATA_DIR || path.join(ROOT, 'data'),
 };

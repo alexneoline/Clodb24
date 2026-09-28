@@ -15,6 +15,7 @@ export function toSetRow(row) {
 }
 
 export async function findProductIdBySku(client, config, sku) {
+  if (!config.skuField) return null;
   for (const iblockId of config.catalogIblockIds) {
     const result = await client.call('catalog.product.list', {
       select: ['id', 'iblockId', 'name'],

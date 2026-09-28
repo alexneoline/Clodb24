@@ -81,8 +81,13 @@ async function loadCatalogs(client) {
   const { catalogs = [] } = (await client.call('catalog.catalog.list', { select: ['iblockId', 'name', 'productIblockId'] })) || {};
   for (const cat of catalogs) {
     const { productProperties = [] } =
-      (await client.call('catalog.productProperty.list', { filter: { iblockId: cat.iblockId }, select: ['id', 'name', 'code'] })) || {};
-    cat.properties = productProperties;
+      (await client.call('catalog.productProperty.list', {
+        filter: { iblockId: cat.iblockId },
+        select: ['id', 'name', 'code', 'propertyType', 'multiple'],
+      })) || {};
+    // Артикул ищется точным совпадением значения — подходят только строки и числа
+    // (не файлы, списки, привязки).
+    cat.properties = productProperties.filter((p) => !p.propertyType || ['S', 'N'].includes(p.propertyType));
   }
   return catalogs;
 }
@@ -98,8 +103,15 @@ export async function settingsPage(client, { authId, settings, message = '', err
     loadError = e.message;
   }
   const selected = new Set(settings.catalogIblockIds.map(Number));
+  // Поле ещё не выбрано — предлагаем свойство «Артикул», если оно есть.
+  let skuField = settings.skuField;
+  if (!skuField) {
+    const art = catalogs.flatMap((c) => c.properties)
+      .find((p) => p.code === 'ARTNUMBER' || /артикул/i.test(p.name || ''));
+    if (art) skuField = `property${art.id}`;
+  }
   const opt = (value, label) =>
-    `<option value="${esc(value)}"${settings.skuField === value ? ' selected' : ''}>${esc(label)}</option>`;
+    `<option value="${esc(value)}"${skuField === value ? ' selected' : ''}>${esc(label)}</option>`;
   const catalogBoxes = catalogs.map((c) =>
     `<label><input type="checkbox" name="iblock" value="${esc(c.iblockId)}"${selected.has(Number(c.iblockId)) ? ' checked' : ''}>
 ${esc(c.name)} <small>(ID ${esc(c.iblockId)}${c.productIblockId ? ', торговые предложения' : ''})</small></label>`).join('<br>');
@@ -107,8 +119,9 @@ ${esc(c.name)} <small>(ID ${esc(c.iblockId)}${c.productIblockId ? ', торго�
     ? `<optgroup label="Свойства: ${esc(c.name)}">${c.properties.map((p) =>
         opt(`property${p.id}`, `${p.name}${p.code ? ` (${p.code})` : ''}`)).join('')}</optgroup>`
     : '').join('');
-  const known = catalogs.some((c) => c.properties.some((p) => `property${p.id}` === settings.skuField))
-    || ['xmlId', 'code'].includes(settings.skuField);
+  const known = !skuField
+    || catalogs.some((c) => c.properties.some((p) => `property${p.id}` === skuField))
+    || ['xmlId', 'code'].includes(skuField);
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#333;max-width:720px}
@@ -127,7 +140,8 @@ ${loadError ? `<p class="err">Не удалось загрузить катал�
 <fieldset><legend>Где искать товары</legend>${catalogBoxes || '<small>Каталоги не найдены</small>'}</fieldset>
 <fieldset><legend>Где в товаре лежит артикул</legend>
 <select name="skuField">
-${known ? '' : opt(settings.skuField, `${settings.skuField} (текущее значение)`)}
+${skuField ? '' : '<option value="" selected disabled>— выберите поле —</option>'}
+${known ? '' : opt(skuField, `${skuField} (текущее значение)`)}
 ${propGroups}
 <optgroup label="Поля товара">${opt('xmlId', 'Внешний код (XML_ID)')}${opt('code', 'Символьный код (CODE)')}</optgroup>
 </select></fieldset>

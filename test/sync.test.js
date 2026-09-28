@@ -230,3 +230,25 @@ test('открытие приложения по корню / сохраняет
     globalThis.fetch = realFetch;
   }
 });
+
+test('settingsPage скрывает нестроковые свойства и предлагает «Артикул», если поле не выбрано', async () => {
+  const { settingsPage } = await import('../src/server.js');
+  const client = {
+    async call(method) {
+      if (method === 'catalog.catalog.list') return { catalogs: [{ iblockId: 25, name: 'Товарный каталог CRM' }] };
+      if (method === 'catalog.productProperty.list') return { productProperties: [
+        { id: 105, name: 'Картинки вариации', code: 'MORE_PHOTO', propertyType: 'F' },
+        { id: 110, name: 'Артикул', code: 'ARTNUMBER', propertyType: 'S' },
+      ] };
+    },
+  };
+  const html = await settingsPage(client, { authId: 't', settings: { catalogIblockIds: [], skuField: '' } });
+  assert.doesNotMatch(html, /MORE_PHOTO/);
+  assert.match(html, /<option value="property110" selected>Артикул \(ARTNUMBER\)<\/option>/);
+
+  const none = await settingsPage({ async call(m) {
+    if (m === 'catalog.catalog.list') return { catalogs: [{ iblockId: 25, name: 'CRM' }] };
+    return { productProperties: [{ id: 7, name: 'Бренд', code: 'BRAND', propertyType: 'S' }] };
+  } }, { authId: 't', settings: { catalogIblockIds: [], skuField: '' } });
+  assert.match(none, /<option value="" selected disabled>— выберите поле —<\/option>/);
+});
