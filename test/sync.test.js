@@ -103,3 +103,16 @@ test('обработчик событий проверяет application_token �
   assert.equal(set.params.id, 77);
   assert.equal(set.params.rows[0].PRODUCT_ID, 9);
 });
+
+test('statusPage показывает каталоги и свойства для настройки', async () => {
+  const { statusPage } = await import('../src/server.js');
+  const client = {
+    async call(method) {
+      if (method === 'catalog.catalog.list') return { catalogs: [{ iblockId: 14, name: 'Товары' }] };
+      if (method === 'catalog.productProperty.list') return { productProperties: [{ id: 105, name: 'Артикул', code: 'ARTNUMBER' }] };
+    },
+  };
+  const html = await statusPage(client);
+  assert.match(html, /<b>14<\/b>/);
+  assert.match(html, /property105<\/code> — Артикул \(ARTNUMBER\)/);
+});

@@ -70,6 +70,36 @@ async function saveAuth(body, tokens) {
   return true;
 }
 
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+// Страница, которую видит пользователь при открытии приложения в Б24:
+// текущие настройки и справочник каталогов/свойств для CATALOG_IBLOCK_IDS и SKU_FIELD.
+export async function statusPage(client) {
+  const rows = [];
+  try {
+    const { catalogs = [] } = (await client.call('catalog.catalog.list', { select: ['iblockId', 'name', 'productIblockId'] })) || {};
+    for (const cat of catalogs) {
+      const { productProperties: props = [] } =
+        (await client.call('catalog.productProperty.list', { filter: { iblockId: cat.iblockId }, select: ['id', 'name', 'code'] })) || {};
+      rows.push(`<tr><td><b>${esc(cat.iblockId)}</b></td><td>${esc(cat.name)}${cat.productIblockId ? ' (торговые предложения)' : ''}</td><td>${
+        props.map((p) => `<code>property${esc(p.id)}</code> — ${esc(p.name)}${p.code ? ` (${esc(p.code)})` : ''}`).join('<br>') || '—'
+      }</td></tr>`);
+    }
+  } catch (e) {
+    rows.push(`<tr><td colspan="3">Не удалось получить каталоги: ${esc(e.message)}</td></tr>`);
+  }
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#333}table{border-collapse:collapse}
+td,th{border:1px solid #ddd;padding:6px 10px;text-align:left;vertical-align:top}code{background:#f3f3f3;padding:1px 4px}
+</style></head><body>
+<h2>SKU Sync работает</h2>
+<p>Токены обновлены. Текущие настройки: <code>CATALOG_IBLOCK_IDS=${esc(config.catalogIblockIds.join(',')) || 'не задан'}</code>,
+<code>SKU_FIELD=${esc(config.skuField)}</code>.</p>
+<p>Поле с артикулом можно задать как <code>property&lt;ID&gt;</code> из таблицы ниже, <code>xmlId</code> (внешний код) или <code>code</code> (символьный код).</p>
+<table><tr><th>iblockId</th><th>Каталог</th><th>Свойства товаров → SKU_FIELD</th></tr>${rows.join('')}</table>
+</body></html>`;
+}
+
 // Сделки обрабатываются последовательно, повторное событие по той же сделке
 // дожидается завершения предыдущего (productrows.set сам порождает OnCrmDealUpdate).
 const queues = new Map();
@@ -127,9 +157,7 @@ export function createServer({ client, tokens }) {
         if (!event && body.AUTH_ID) {
           const ok = await saveAuth(body, tokens);
           res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' });
-          return res.end(ok
-            ? '<!doctype html><meta charset="utf-8"><p>SKU-синхронизация работает. Токены обновлены.</p>'
-            : 'No valid auth data');
+          return res.end(ok ? await statusPage(client) : 'No valid auth data');
         }
 
         // ONAPPINSTALL приходит с application_token — запоминаем его для проверки событий.
