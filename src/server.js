@@ -2,7 +2,8 @@ import http from 'node:http';
 import { config } from './config.js';
 import { TokenStore } from './tokenStore.js';
 import { B24Client } from './b24client.js';
-import { syncDeal, findProductIdBySku } from './dealSync.js';
+import { syncDeal, findProductBySku } from './dealSync.js';
+import { SKU_FORMATS, extractSkus } from './sku.js';
 import { parseNestedForm } from './formParser.js';
 import { getSettings, saveSettings } from './settings.js';
 
@@ -145,13 +146,33 @@ ${known ? '' : opt(skuField, `${skuField} (текущее значение)`)}
 ${propGroups}
 <optgroup label="Поля товара">${opt('xmlId', 'Внешний код (XML_ID)')}${opt('code', 'Символьный код (CODE)')}</optgroup>
 </select></fieldset>
+<fieldset><legend>Как артикул записан в названии товара в сделке</legend>
+${Object.entries(SKU_FORMATS).map(([value, f]) =>
+    `<label><input type="radio" name="skuFormat" value="${esc(value)}"${settings.skuFormat === value ? ' checked' : ''}> ${esc(f.label)}</label>`).join('<br>')}
+<br><small>Другой текст в скобках («[Wi-Fi]», «[2 шт]») артикулом не считается. Если в названии несколько
+подходящих скобок, берётся первая, для которой нашёлся товар.</small></fieldset>
 <fieldset><legend>Проверка (необязательно)</legend>
-<input type="text" name="testSku" placeholder="Артикул, например SKU-123"><br>
-<small>После сохранения приложение попробует найти товар с этим артикулом.</small></fieldset>
+<input type="text" name="testSku" placeholder="8808060009108 или «Neoline Shadow [SKU-8808060009108]»"><br>
+<small>Артикул или название товара как в сделке. После сохранения приложение покажет, какой товар будет выбран.</small></fieldset>
 <button type="submit">Сохранить</button>
 </form>
 <p><small>Настройки хранятся на портале и не теряются при обновлении приложения. Изменять их может только администратор.</small></p>
 </body></html>`;
+}
+
+// Проверка со страницы настроек: принимает артикул или название товара как в сделке.
+export async function checkSku(client, settings, input) {
+  const skus = /\[/.test(input) ? extractSkus(input, settings.skuFormat) : [input];
+  if (!skus.length) return `Проверка: в «${input}» не найден артикул в выбранном формате.`;
+  const parts = [];
+  for (const sku of skus) {
+    const found = await findProductBySku(client, settings, sku);
+    if (found?.id) return `Проверка: артикул ${sku} → товар ID ${found.id}.`;
+    parts.push(found?.ambiguous
+      ? `артикул ${sku} есть у нескольких товаров (ID ${found.ambiguous.join(', ')}) — привязка не выполнится, пока дубли не устранят`
+      : `товар с артикулом ${sku} не найден`);
+  }
+  return `Проверка: ${parts.join('; ')}.`;
 }
 
 // Сделки обрабатываются последовательно, повторное событие по той же сделке
@@ -214,14 +235,12 @@ export function createServer({ client, tokens }) {
           settings = await saveSettings(client, authId, config, {
             catalogIblockIds: form.getAll('iblock'),
             skuField: form.get('skuField') || '',
+            skuFormat: form.get('skuFormat') || '',
           });
           message = 'Настройки сохранены.';
           log(`Настройки: каталоги ${settings.catalogIblockIds.join(',')}, поле ${settings.skuField}`);
-          const testSku = (form.get('testSku') || '').trim();
-          if (testSku) {
-            const id = await findProductIdBySku(client, { ...config, ...settings }, testSku);
-            message += id ? ` Проверка: артикул ${testSku} → товар ID ${id}.` : ` Проверка: товар с артикулом ${testSku} не найден.`;
-          }
+          const testInput = (form.get('testSku') || '').trim();
+          if (testInput) message += ' ' + await checkSku(client, { ...config, ...settings }, testInput);
         } catch (e) {
           error = e.message;
         }
@@ -286,7 +305,8 @@ export function createServer({ client, tokens }) {
             syncDeal(client, { ...config, ...(await getSettings(client, config)) }, dealId, (s) =>
               log(`Сделка ${s.dealId}: обновлено позиций ${s.changed.length}` +
                 (s.changed.length ? ` (${s.changed.map((c) => `${c.sku}→${c.to}`).join(', ')})` : '') +
-                (s.notFound.length ? `; не найдены в каталоге: ${s.notFound.join(', ')}` : '')),
+                (s.notFound.length ? `; не найдены в каталоге: ${s.notFound.join(', ')}` : '') +
+                (s.ambiguous.length ? `; несколько товаров с артикулом: ${s.ambiguous.map((a) => `${a.sku} (ID ${a.ids.join(',')})`).join(', ')}` : '')),
             ).catch((e) => log(`Сделка ${dealId}: ошибка`, e.message)),
           );
         }

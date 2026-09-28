@@ -1,3 +1,5 @@
+import { SKU_FORMATS } from './sku.js';
+
 // Настройки поиска по каталогу. Хранятся в опциях приложения на портале
 // (app.option.*), поэтому переживают передеплой; переменные окружения — значения по умолчанию.
 
@@ -11,9 +13,11 @@ function fromOptions(opts, config) {
     .map((s) => Number(s.trim()))
     .filter(Boolean);
   const skuField = SKU_FIELD_PATTERN.test(opts?.skuField || '') ? opts.skuField : config.skuField;
+  const skuFormat = SKU_FORMATS[opts?.skuFormat] ? opts.skuFormat : config.skuFormat;
   return {
     catalogIblockIds: ids.length ? ids : config.catalogIblockIds,
     skuField,
+    skuFormat,
     source: ids.length || opts?.skuField ? 'portal' : 'env',
   };
 }
@@ -30,14 +34,15 @@ export async function getSettings(client, config) {
   }
 }
 
-export async function saveSettings(client, accessToken, config, { catalogIblockIds, skuField }) {
+export async function saveSettings(client, accessToken, config, { catalogIblockIds, skuField, skuFormat }) {
   if (!SKU_FIELD_PATTERN.test(skuField)) throw new Error(`Недопустимое поле артикула: ${skuField}`);
+  if (!SKU_FORMATS[skuFormat]) throw new Error(`Недопустимый формат артикула: ${skuFormat}`);
   const ids = catalogIblockIds.map(Number).filter(Boolean);
   if (!ids.length) throw new Error('Выберите хотя бы один каталог');
   await client.callWithAuth(accessToken, 'app.option.set', {
-    options: { catalogIblockIds: ids.join(','), skuField },
+    options: { catalogIblockIds: ids.join(','), skuField, skuFormat },
   });
-  cache = fromOptions({ catalogIblockIds: ids.join(','), skuField }, config);
+  cache = fromOptions({ catalogIblockIds: ids.join(','), skuField, skuFormat }, config);
   return cache;
 }
 

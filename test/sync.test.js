@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractSku } from '../src/sku.js';
+import { extractSkus } from '../src/sku.js';
 import { syncDeal } from '../src/dealSync.js';
 import { parseNestedForm } from '../src/formParser.js';
 import { createServer } from '../src/server.js';
 
-const regex = /\[(SKU-[A-Za-z0-9._\/-]+)\]/i;
-const config = { catalogIblockIds: [14], skuField: 'property105', skuRegex: regex };
+const config = { catalogIblockIds: [14], skuField: 'property105', skuFormat: 'sku_or_digits' };
 
 function mockClient(rows, catalog) {
   const calls = [];
@@ -16,8 +15,9 @@ function mockClient(rows, catalog) {
       calls.push({ method, params });
       if (method === 'crm.deal.productrows.get') return rows;
       if (method === 'catalog.product.list') {
-        const id = catalog[params.filter.property105];
-        return { products: id ? [{ id, iblockId: 14 }] : [] };
+        // значение — ID товара или массив ID (дубли артикула)
+        const ids = [].concat(catalog[params.filter.property105] || []);
+        return { products: ids.map((id) => ({ id, iblockId: 14 })) };
       }
       if (method === 'crm.deal.productrows.set') return true;
       throw new Error(`unexpected ${method}`);
@@ -25,11 +25,33 @@ function mockClient(rows, catalog) {
   };
 }
 
-test('extractSku', () => {
-  assert.equal(extractSku('Фильтр масляный [SKU-123]', regex), 'SKU-123');
-  assert.equal(extractSku('[sku-12-AB.3] Датчик', regex), 'sku-12-AB.3');
-  assert.equal(extractSku('Без артикула', regex), null);
-  assert.equal(extractSku(null, regex), null);
+test('extractSkus: форматы [SKU-…] и [цифры], посторонние скобки игнорируются', () => {
+  assert.deepEqual(extractSkus('Фильтр масляный [SKU-123]'), ['SKU-123']);
+  assert.deepEqual(extractSkus('[sku-12-AB.3] Датчик'), ['sku-12-AB.3']);
+  assert.deepEqual(extractSkus('Neoline Shadow [Wi-Fi] [2 шт] [8808060009108]'), ['8808060009108']);
+  assert.deepEqual(extractSkus('X [8808060009108] [SKU-77]'), ['8808060009108', 'SKU-77']);
+  assert.deepEqual(extractSkus('X [8808060009108] [SKU-77]', 'sku'), ['SKU-77']);
+  assert.deepEqual(extractSkus('X [8808060009108] [SKU-77]', 'digits'), ['8808060009108']);
+  assert.deepEqual(extractSkus('Кабель [12]'), []); // слишком короткое число — не артикул
+  assert.deepEqual(extractSkus('Без артикула'), []);
+  assert.deepEqual(extractSkus(null), []);
+});
+
+test('syncDeal не привязывает, если у артикула несколько товаров', async () => {
+  const rows = [{ PRODUCT_ID: 0, PRODUCT_NAME: 'Neoline [8808060009108]', PRICE: 1, QUANTITY: 1 }];
+  const client = mockClient(rows, { '8808060009108': [545439, 545440] });
+  const s = await syncDeal(client, config, 3);
+  assert.equal(s.updated, false);
+  assert.deepEqual(s.ambiguous, [{ sku: '8808060009108', ids: [545439, 545440] }]);
+  assert.deepEqual(s.notFound, []);
+  assert.ok(!client.calls.some((c) => c.method === 'crm.deal.productrows.set'));
+});
+
+test('syncDeal берёт первую скобку, по которой нашёлся товар', async () => {
+  const rows = [{ PRODUCT_ID: 0, PRODUCT_NAME: 'Комплект [1234] [8808060009108]', PRICE: 1, QUANTITY: 1 }];
+  const client = mockClient(rows, { '8808060009108': 545439 });
+  const s = await syncDeal(client, config, 4);
+  assert.deepEqual(s.changed, [{ index: 0, sku: '8808060009108', from: 0, to: 545439 }]);
 });
 
 test('parseNestedForm', () => {
@@ -154,16 +176,16 @@ async function postSettings(client, body) {
 
 test('/settings сохраняет выбор администратора в опции приложения и проверяет артикул', async () => {
   const client = settingsClient();
-  const { status, text } = await postSettings(client, 'AUTH_ID=tok&iblock=14&skuField=property105&testSku=SKU-1');
+  const { status, text } = await postSettings(client, 'AUTH_ID=tok&iblock=14&skuField=property105&skuFormat=sku&testSku=SKU-1');
   assert.equal(status, 200);
   const set = client.calls.find((c) => c.method === 'app.option.set');
   assert.equal(set.token, 'tok');
-  assert.deepEqual(set.params.options, { catalogIblockIds: '14', skuField: 'property105' });
+  assert.deepEqual(set.params.options, { catalogIblockIds: '14', skuField: 'property105', skuFormat: 'sku' });
   assert.match(text, /Настройки сохранены/);
   assert.match(text, /SKU-1 → товар ID 9/);
 
   const { getSettings } = await import('../src/settings.js');
-  assert.deepEqual(await getSettings(client, config), { catalogIblockIds: [14], skuField: 'property105', source: 'portal' });
+  assert.deepEqual(await getSettings(client, config), { catalogIblockIds: [14], skuField: 'property105', skuFormat: 'sku', source: 'portal' });
 });
 
 test('/settings отклоняет не-администратора и недопустимое поле', async () => {
@@ -172,7 +194,7 @@ test('/settings отклоняет не-администратора и недо
   assert.ok(!client.calls.some((c) => c.method === 'app.option.set'));
 
   const admin = settingsClient();
-  const { text } = await postSettings(admin, 'AUTH_ID=tok&iblock=14&skuField=NAME');
+  const { text } = await postSettings(admin, 'AUTH_ID=tok&iblock=14&skuField=NAME&skuFormat=sku');
   assert.match(text, /Недопустимое поле артикула/);
   assert.ok(!admin.calls.some((c) => c.method === 'app.option.set'));
 });
@@ -180,12 +202,12 @@ test('/settings отклоняет не-администратора и недо
 test('getSettings берёт настройки портала, иначе значения из окружения', async () => {
   const { getSettings, resetSettingsCache } = await import('../src/settings.js');
   resetSettingsCache();
-  const env = { catalogIblockIds: [], skuField: 'property105' };
+  const env = { catalogIblockIds: [], skuField: 'property105', skuFormat: 'sku_or_digits' };
   assert.deepEqual(await getSettings(settingsClient({ options: { catalogIblockIds: '14,20', skuField: 'xmlId' } }), env),
-    { catalogIblockIds: [14, 20], skuField: 'xmlId', source: 'portal' });
+    { catalogIblockIds: [14, 20], skuField: 'xmlId', skuFormat: 'sku_or_digits', source: 'portal' });
   resetSettingsCache();
   const failing = { async call() { throw new Error('no tokens'); } };
-  assert.deepEqual(await getSettings(failing, env), { catalogIblockIds: [], skuField: 'property105', source: 'env' });
+  assert.deepEqual(await getSettings(failing, env), { catalogIblockIds: [], skuField: 'property105', skuFormat: 'sku_or_digits', source: 'env' });
 });
 
 test('открытие приложения по корню / сохраняет токены, подписывается и завершает установку', async () => {
@@ -262,4 +284,17 @@ test('поиск по артикулу пробует значение без п
   const client = mockClient(rows, { '8808060009108': 545439 });
   const s = await syncDeal(client, config, 5);
   assert.deepEqual(s.changed, [{ index: 0, sku: 'SKU-8808060009108', from: 0, to: 545439 }]);
+});
+
+test('checkSku понимает название товара и сообщает о дублях', async () => {
+  const { checkSku, settingsPage } = await import('../src/server.js');
+  const client = mockClient([], { '8808060009108': [545439, 545440], 'SKU-5': 9 });
+  assert.match(await checkSku(client, config, 'Neoline Shadow [Wi-Fi] [8808060009108]'),
+    /8808060009108 есть у нескольких товаров \(ID 545439, 545440\)/);
+  assert.match(await checkSku(client, config, 'SKU-5'), /SKU-5 → товар ID 9/);
+  assert.match(await checkSku(client, config, 'Регистратор [Wi-Fi]'), /не найден артикул/);
+
+  const html = await settingsPage({ async call() { return {}; } },
+    { authId: 't', settings: { catalogIblockIds: [], skuField: 'xmlId', skuFormat: 'digits' } });
+  assert.match(html, /name="skuFormat" value="digits" checked/);
 });

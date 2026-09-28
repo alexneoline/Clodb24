@@ -37,6 +37,7 @@ export const config = {
     .map((s) => Number(s.trim()))
     .filter(Boolean),
   skuField: env.SKU_FIELD || '',
-  skuRegex: new RegExp(env.SKU_REGEX || '\\[(SKU-[A-Za-z0-9._\\/-]+)\\]', 'i'),
+  // Формат артикула в названии: sku_or_digits | sku | digits (см. src/sku.js)
+  skuFormat: env.SKU_FORMAT || 'sku_or_digits',
   dataDir: env.DATA_DIR || path.join(ROOT, 'data'),
 };
