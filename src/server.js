@@ -55,7 +55,7 @@ export function createServer({ client, tokens }) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
-      if (req.method === 'GET' && url.pathname === '/health') {
+      if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: true, installed: Boolean(tokens.load()?.access_token) }));
       }
