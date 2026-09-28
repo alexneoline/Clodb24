@@ -38,6 +38,17 @@ export class B24Client {
     return body.result;
   }
 
+  // Вызов от имени конкретного пользователя (токен из фрейма приложения).
+  async callWithAuth(accessToken, method, params = {}) {
+    const res = await this.fetch(
+      `https://${this.config.domain}/rest/${method}.json?auth=${encodeURIComponent(accessToken)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) },
+    );
+    const body = await res.json();
+    if (body.error) throw new B24Error(method, body.error, body.error_description);
+    return body.result;
+  }
+
   endpoint(method) {
     const { transport } = this.config;
     if (transport === 'webhook') {

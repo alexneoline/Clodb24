@@ -3,6 +3,7 @@ import { config } from '../src/config.js';
 import { TokenStore } from '../src/tokenStore.js';
 import { B24Client } from '../src/b24client.js';
 import { syncDeal } from '../src/dealSync.js';
+import { getSettings } from '../src/settings.js';
 
 const dealId = Number(process.argv[2]);
 if (!dealId) {
@@ -10,7 +11,8 @@ if (!dealId) {
   process.exit(1);
 }
 const client = new B24Client(config, new TokenStore(config.dataDir));
-syncDeal(client, config, dealId)
+getSettings(client, config)
+  .then((settings) => syncDeal(client, { ...config, ...settings }, dealId))
   .then((s) => console.log(JSON.stringify(s, null, 2)))
   .catch((e) => {
     console.error(e.message);

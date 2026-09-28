@@ -2,8 +2,9 @@ import http from 'node:http';
 import { config } from './config.js';
 import { TokenStore } from './tokenStore.js';
 import { B24Client } from './b24client.js';
-import { syncDeal } from './dealSync.js';
+import { syncDeal, findProductIdBySku } from './dealSync.js';
 import { parseNestedForm } from './formParser.js';
+import { getSettings, saveSettings } from './settings.js';
 
 const EVENT = 'ONCRMDEALUPDATE';
 const log = (...args) => console.log(new Date().toISOString(), ...args);
@@ -72,31 +73,65 @@ async function saveAuth(body, tokens) {
 
 const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
-// Страница, которую видит пользователь при открытии приложения в Б24:
-// текущие настройки и справочник каталогов/свойств для CATALOG_IBLOCK_IDS и SKU_FIELD.
-export async function statusPage(client) {
-  const rows = [];
-  try {
-    const { catalogs = [] } = (await client.call('catalog.catalog.list', { select: ['iblockId', 'name', 'productIblockId'] })) || {};
-    for (const cat of catalogs) {
-      const { productProperties: props = [] } =
-        (await client.call('catalog.productProperty.list', { filter: { iblockId: cat.iblockId }, select: ['id', 'name', 'code'] })) || {};
-      rows.push(`<tr><td><b>${esc(cat.iblockId)}</b></td><td>${esc(cat.name)}${cat.productIblockId ? ' (торговые предложения)' : ''}</td><td>${
-        props.map((p) => `<code>property${esc(p.id)}</code> — ${esc(p.name)}${p.code ? ` (${esc(p.code)})` : ''}`).join('<br>') || '—'
-      }</td></tr>`);
-    }
-  } catch (e) {
-    rows.push(`<tr><td colspan="3">Не удалось получить каталоги: ${esc(e.message)}</td></tr>`);
+async function loadCatalogs(client) {
+  const { catalogs = [] } = (await client.call('catalog.catalog.list', { select: ['iblockId', 'name', 'productIblockId'] })) || {};
+  for (const cat of catalogs) {
+    const { productProperties = [] } =
+      (await client.call('catalog.productProperty.list', { filter: { iblockId: cat.iblockId }, select: ['id', 'name', 'code'] })) || {};
+    cat.properties = productProperties;
   }
+  return catalogs;
+}
+
+// Страница настроек, которую видит пользователь при открытии приложения в Б24:
+// выбор каталогов и поля, в котором у товаров хранится артикул.
+export async function settingsPage(client, { authId, settings, message = '', error = '' }) {
+  let catalogs = [];
+  let loadError = '';
+  try {
+    catalogs = await loadCatalogs(client);
+  } catch (e) {
+    loadError = e.message;
+  }
+  const selected = new Set(settings.catalogIblockIds.map(Number));
+  const opt = (value, label) =>
+    `<option value="${esc(value)}"${settings.skuField === value ? ' selected' : ''}>${esc(label)}</option>`;
+  const catalogBoxes = catalogs.map((c) =>
+    `<label><input type="checkbox" name="iblock" value="${esc(c.iblockId)}"${selected.has(Number(c.iblockId)) ? ' checked' : ''}>
+${esc(c.name)} <small>(ID ${esc(c.iblockId)}${c.productIblockId ? ', торговые предложения' : ''})</small></label>`).join('<br>');
+  const propGroups = catalogs.map((c) => c.properties.length
+    ? `<optgroup label="Свойства: ${esc(c.name)}">${c.properties.map((p) =>
+        opt(`property${p.id}`, `${p.name}${p.code ? ` (${p.code})` : ''}`)).join('')}</optgroup>`
+    : '').join('');
+  const known = catalogs.some((c) => c.properties.some((p) => `property${p.id}` === settings.skuField))
+    || ['xmlId', 'code'].includes(settings.skuField);
+
   return `<!doctype html><html><head><meta charset="utf-8"><style>
-body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#333}table{border-collapse:collapse}
-td,th{border:1px solid #ddd;padding:6px 10px;text-align:left;vertical-align:top}code{background:#f3f3f3;padding:1px 4px}
+body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#333;max-width:720px}
+fieldset{border:1px solid #ddd;border-radius:6px;margin:0 0 16px;padding:12px 16px}legend{font-weight:600}
+select,input[type=text]{font:inherit;padding:4px 6px;min-width:320px}button{font:inherit;padding:6px 16px;background:#2fc6f6;border:0;border-radius:4px;color:#fff;cursor:pointer}
+.ok{background:#e6f7e6;padding:8px 12px;border-radius:4px}.err{background:#fde8e8;padding:8px 12px;border-radius:4px}small{color:#777}
 </style></head><body>
-<h2>SKU Sync работает</h2>
-<p>Токены обновлены. Текущие настройки: <code>CATALOG_IBLOCK_IDS=${esc(config.catalogIblockIds.join(',')) || 'не задан'}</code>,
-<code>SKU_FIELD=${esc(config.skuField)}</code>.</p>
-<p>Поле с артикулом можно задать как <code>property&lt;ID&gt;</code> из таблицы ниже, <code>xmlId</code> (внешний код) или <code>code</code> (символьный код).</p>
-<table><tr><th>iblockId</th><th>Каталог</th><th>Свойства товаров → SKU_FIELD</th></tr>${rows.join('')}</table>
+<h2>SKU Sync — настройки</h2>
+<p>При изменении сделки приложение берёт артикул из названия товара (например <code>[SKU-123]</code>),
+ищет товар с таким артикулом в каталоге и привязывает позицию сделки к нему.</p>
+${message ? `<p class="ok">${esc(message)}</p>` : ''}${error ? `<p class="err">${esc(error)}</p>` : ''}
+${loadError ? `<p class="err">Не удалось загрузить каталоги: ${esc(loadError)}</p>` : ''}
+<form method="post" action="settings">
+<input type="hidden" name="AUTH_ID" value="${esc(authId)}">
+<fieldset><legend>Где искать товары</legend>${catalogBoxes || '<small>Каталоги не найдены</small>'}</fieldset>
+<fieldset><legend>Где в товаре лежит артикул</legend>
+<select name="skuField">
+${known ? '' : opt(settings.skuField, `${settings.skuField} (текущее значение)`)}
+${propGroups}
+<optgroup label="Поля товара">${opt('xmlId', 'Внешний код (XML_ID)')}${opt('code', 'Символьный код (CODE)')}</optgroup>
+</select></fieldset>
+<fieldset><legend>Проверка (необязательно)</legend>
+<input type="text" name="testSku" placeholder="Артикул, например SKU-123"><br>
+<small>После сохранения приложение попробует найти товар с этим артикулом.</small></fieldset>
+<button type="submit">Сохранить</button>
+</form>
+<p><small>Настройки хранятся на портале и не теряются при обновлении приложения. Изменять их может только администратор.</small></p>
 </body></html>`;
 }
 
@@ -125,7 +160,8 @@ export function createServer({ client, tokens }) {
         res.writeHead(405);
         return res.end();
       }
-      const body = parse(req, await readBody(req));
+      const raw = await readBody(req);
+      const body = parse(req, raw);
 
       // Установка локального приложения: Б24 открывает обработчик установки
       // с AUTH_ID/REFRESH_ID в теле и DOMAIN/member_id в query/теле.
@@ -148,6 +184,45 @@ export function createServer({ client, tokens }) {
 <script>BX24.init(function(){ BX24.installFinish(); });</script></body></html>`);
       }
 
+      // Сохранение настроек со страницы приложения. Только для администраторов портала.
+      if (url.pathname === '/settings') {
+        const form = new URLSearchParams(raw);
+        const authId = form.get('AUTH_ID') || '';
+        const html = (opts) => {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(opts);
+        };
+        let isAdmin = false;
+        try {
+          isAdmin = (await client.callWithAuth(authId, 'user.admin')) === true;
+        } catch {
+          isAdmin = false;
+        }
+        if (!isAdmin) {
+          res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end('<!doctype html><meta charset="utf-8"><p>Изменять настройки может только администратор портала. Откройте приложение заново.</p>');
+        }
+        let settings = await getSettings(client, config);
+        let message = '';
+        let error = '';
+        try {
+          settings = await saveSettings(client, authId, config, {
+            catalogIblockIds: form.getAll('iblock'),
+            skuField: form.get('skuField') || '',
+          });
+          message = 'Настройки сохранены.';
+          log(`Настройки: каталоги ${settings.catalogIblockIds.join(',')}, поле ${settings.skuField}`);
+          const testSku = (form.get('testSku') || '').trim();
+          if (testSku) {
+            const id = await findProductIdBySku(client, { ...config, ...settings }, testSku);
+            message += id ? ` Проверка: артикул ${testSku} → товар ID ${id}.` : ` Проверка: товар с артикулом ${testSku} не найден.`;
+          }
+        } catch (e) {
+          error = e.message;
+        }
+        return html(await settingsPage(client, { authId, settings, message, error }));
+      }
+
       if (url.pathname === '/handler') {
         const event = String(body.event || '').toUpperCase();
         const appToken = body.auth?.application_token;
@@ -157,7 +232,9 @@ export function createServer({ client, tokens }) {
         if (!event && body.AUTH_ID) {
           const ok = await saveAuth(body, tokens);
           res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' });
-          return res.end(ok ? await statusPage(client) : 'No valid auth data');
+          return res.end(ok
+            ? await settingsPage(client, { authId: body.AUTH_ID, settings: await getSettings(client, config) })
+            : 'No valid auth data');
         }
 
         // ONAPPINSTALL приходит с application_token — запоминаем его для проверки событий.
@@ -183,8 +260,8 @@ export function createServer({ client, tokens }) {
         res.end('ok');
 
         if (event === EVENT && dealId) {
-          enqueue(dealId, () =>
-            syncDeal(client, config, dealId, (s) =>
+          enqueue(dealId, async () =>
+            syncDeal(client, { ...config, ...(await getSettings(client, config)) }, dealId, (s) =>
               log(`Сделка ${s.dealId}: обновлено позиций ${s.changed.length}` +
                 (s.changed.length ? ` (${s.changed.map((c) => `${c.sku}→${c.to}`).join(', ')})` : '') +
                 (s.notFound.length ? `; не найдены в каталоге: ${s.notFound.join(', ')}` : '')),
@@ -207,7 +284,6 @@ export function createServer({ client, tokens }) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const tokens = new TokenStore(config.dataDir);
   const client = new B24Client(config, tokens);
-  if (!config.catalogIblockIds.length) log('ВНИМАНИЕ: CATALOG_IBLOCK_IDS не задан — поиск по каталогу не будет работать');
   createServer({ client, tokens }).listen(config.port, () => {
     log(`Сервер слушает :${config.port}. Обработчик событий: ${config.publicUrl || '<PUBLIC_URL>'}/handler, установка: /install`);
   });

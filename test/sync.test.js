@@ -104,15 +104,86 @@ test('обработчик событий проверяет application_token �
   assert.equal(set.params.rows[0].PRODUCT_ID, 9);
 });
 
-test('statusPage показывает каталоги и свойства для настройки', async () => {
-  const { statusPage } = await import('../src/server.js');
-  const client = {
-    async call(method) {
+function settingsClient({ admin = true, options = {} } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async call(method, params) {
+      calls.push({ method, params });
+      if (method === 'app.option.get') return options;
       if (method === 'catalog.catalog.list') return { catalogs: [{ iblockId: 14, name: 'Товары' }] };
       if (method === 'catalog.productProperty.list') return { productProperties: [{ id: 105, name: 'Артикул', code: 'ARTNUMBER' }] };
+      if (method === 'catalog.product.list') return { products: params.filter.property105 === 'SKU-1' ? [{ id: 9 }] : [] };
+      throw new Error(`unexpected ${method}`);
+    },
+    async callWithAuth(token, method, params) {
+      calls.push({ method, params, token });
+      if (method === 'user.admin') return admin;
+      if (method === 'app.option.set') return true;
+      throw new Error(`unexpected ${method}`);
     },
   };
-  const html = await statusPage(client);
-  assert.match(html, /<b>14<\/b>/);
-  assert.match(html, /property105<\/code> — Артикул \(ARTNUMBER\)/);
+}
+
+test('settingsPage показывает каталоги и свойства с текущим выбором', async () => {
+  const { settingsPage } = await import('../src/server.js');
+  const html = await settingsPage(settingsClient(), {
+    authId: 'tok',
+    settings: { catalogIblockIds: [14], skuField: 'property105' },
+  });
+  assert.match(html, /name="iblock" value="14" checked/);
+  assert.match(html, /<option value="property105" selected>Артикул \(ARTNUMBER\)<\/option>/);
+  assert.match(html, /name="AUTH_ID" value="tok"/);
+});
+
+async function postSettings(client, body) {
+  const { createServer } = await import('../src/server.js');
+  const { resetSettingsCache } = await import('../src/settings.js');
+  resetSettingsCache();
+  const server = createServer({ client, tokens: { load: () => ({}), save() {} } });
+  await new Promise((r) => server.listen(0, r));
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const text = await res.text();
+  server.close();
+  return { status: res.status, text };
+}
+
+test('/settings сохраняет выбор администратора в опции приложения и проверяет артикул', async () => {
+  const client = settingsClient();
+  const { status, text } = await postSettings(client, 'AUTH_ID=tok&iblock=14&skuField=property105&testSku=SKU-1');
+  assert.equal(status, 200);
+  const set = client.calls.find((c) => c.method === 'app.option.set');
+  assert.equal(set.token, 'tok');
+  assert.deepEqual(set.params.options, { catalogIblockIds: '14', skuField: 'property105' });
+  assert.match(text, /Настройки сохранены/);
+  assert.match(text, /SKU-1 → товар ID 9/);
+
+  const { getSettings } = await import('../src/settings.js');
+  assert.deepEqual(await getSettings(client, config), { catalogIblockIds: [14], skuField: 'property105', source: 'portal' });
+});
+
+test('/settings отклоняет не-администратора и недопустимое поле', async () => {
+  const client = settingsClient({ admin: false });
+  assert.equal((await postSettings(client, 'AUTH_ID=tok&iblock=14&skuField=property105')).status, 403);
+  assert.ok(!client.calls.some((c) => c.method === 'app.option.set'));
+
+  const admin = settingsClient();
+  const { text } = await postSettings(admin, 'AUTH_ID=tok&iblock=14&skuField=NAME');
+  assert.match(text, /Недопустимое поле артикула/);
+  assert.ok(!admin.calls.some((c) => c.method === 'app.option.set'));
+});
+
+test('getSettings берёт настройки портала, иначе значения из окружения', async () => {
+  const { getSettings, resetSettingsCache } = await import('../src/settings.js');
+  resetSettingsCache();
+  const env = { catalogIblockIds: [], skuField: 'property105' };
+  assert.deepEqual(await getSettings(settingsClient({ options: { catalogIblockIds: '14,20', skuField: 'xmlId' } }), env),
+    { catalogIblockIds: [14, 20], skuField: 'xmlId', source: 'portal' });
+  resetSettingsCache();
+  const failing = { async call() { throw new Error('no tokens'); } };
+  assert.deepEqual(await getSettings(failing, env), { catalogIblockIds: [], skuField: 'property105', source: 'env' });
 });
