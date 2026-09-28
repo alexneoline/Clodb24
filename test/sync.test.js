@@ -187,3 +187,46 @@ test('getSettings берёт настройки портала, иначе зн�
   const failing = { async call() { throw new Error('no tokens'); } };
   assert.deepEqual(await getSettings(failing, env), { catalogIblockIds: [], skuField: 'property105', source: 'env' });
 });
+
+test('открытие приложения по корню / сохраняет токены, подписывается и завершает установку', async () => {
+  const { createServer } = await import('../src/server.js');
+  const { resetSettingsCache } = await import('../src/settings.js');
+  resetSettingsCache();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) =>
+    String(url).includes('/rest/app.info.json')
+      ? new Response(JSON.stringify({ result: { INSTALLED: false } }))
+      : realFetch(url, opts);
+
+  const client = settingsClient();
+  const origCall = client.call;
+  client.call = async (method, params) => {
+    if (method === 'event.get') return [];
+    if (method === 'event.bind') { client.calls.push({ method, params }); return true; }
+    return origCall(method, params);
+  };
+  let stored = {};
+  const server = createServer({ client, tokens: { load: () => stored, save: (d) => (stored = { ...stored, ...d }) } });
+  await new Promise((r) => server.listen(0, r));
+  try {
+    const res = await realFetch(`http://127.0.0.1:${server.address().port}/?DOMAIN=neoline.bitrix24.ru`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'AUTH_ID=tok&REFRESH_ID=ref&member_id=m1',
+    });
+    const html = await res.text();
+    assert.equal(res.status, 200);
+    assert.equal(stored.access_token, 'tok');
+    assert.equal(stored.refresh_token, 'ref');
+    assert.ok(client.calls.some((c) => c.method === 'event.bind' && c.params.event === 'ONCRMDEALUPDATE'));
+    assert.match(html, /SKU Sync — настройки/);
+    assert.match(html, /BX24\.installFinish/);
+
+    const get = await realFetch(`http://127.0.0.1:${server.address().port}/`);
+    assert.equal(get.status, 200);
+    assert.match(await get.text(), /Откройте приложение из меню Битрикс24/);
+  } finally {
+    server.close();
+    globalThis.fetch = realFetch;
+  }
+});

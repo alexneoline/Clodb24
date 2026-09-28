@@ -7,6 +7,8 @@ import { parseNestedForm } from './formParser.js';
 import { getSettings, saveSettings } from './settings.js';
 
 const EVENT = 'ONCRMDEALUPDATE';
+// Б24 может открыть приложение по любому из этих путей; события приходят туда же.
+const APP_PATHS = new Set(['/', '/handler', '/install']);
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
 function readBody(req) {
@@ -46,18 +48,20 @@ export async function bindEvent(client) {
 async function saveAuth(body, tokens) {
   const auth = body.auth || {};
   const accessToken = body.AUTH_ID || auth.access_token;
-  if (!accessToken) return false;
+  if (!accessToken) return null;
   const endpoint = `https://${config.domain}/rest/`;
+  let info;
   try {
     const res = await fetch(`${endpoint}app.info.json?auth=${encodeURIComponent(accessToken)}`);
-    const info = await res.json();
-    if (!info.result) {
-      log('Отклонены токены: app.info вернул', info.error || res.status);
-      return false;
+    const body = await res.json();
+    if (!body.result) {
+      log('Отклонены токены: app.info вернул', body.error || res.status);
+      return null;
     }
+    info = body.result;
   } catch (e) {
     log('Не удалось проверить токены:', e.message);
-    return false;
+    return null;
   }
   tokens.save({
     access_token: accessToken,
@@ -68,7 +72,7 @@ async function saveAuth(body, tokens) {
     ...(auth.application_token ? { application_token: auth.application_token } : {}),
   });
   log('Токены приложения сохранены');
-  return true;
+  return info;
 }
 
 const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -85,7 +89,7 @@ async function loadCatalogs(client) {
 
 // Страница настроек, которую видит пользователь при открытии приложения в Б24:
 // выбор каталогов и поля, в котором у товаров хранится артикул.
-export async function settingsPage(client, { authId, settings, message = '', error = '' }) {
+export async function settingsPage(client, { authId, settings, message = '', error = '', finishInstall = false }) {
   let catalogs = [];
   let loadError = '';
   try {
@@ -111,7 +115,8 @@ body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#333;max-width:720px}
 fieldset{border:1px solid #ddd;border-radius:6px;margin:0 0 16px;padding:12px 16px}legend{font-weight:600}
 select,input[type=text]{font:inherit;padding:4px 6px;min-width:320px}button{font:inherit;padding:6px 16px;background:#2fc6f6;border:0;border-radius:4px;color:#fff;cursor:pointer}
 .ok{background:#e6f7e6;padding:8px 12px;border-radius:4px}.err{background:#fde8e8;padding:8px 12px;border-radius:4px}small{color:#777}
-</style></head><body>
+</style>${finishInstall ? '<script src="//api.bitrix24.com/api/v1/"></script><script>BX24.init(function(){ BX24.installFinish(); });</script>' : ''}
+</head><body>
 <h2>SKU Sync — настройки</h2>
 <p>При изменении сделки приложение берёт артикул из названия товара (например <code>[SKU-123]</code>),
 ищет товар с таким артикулом в каталоге и привязывает позицию сделки к нему.</p>
@@ -151,9 +156,16 @@ export function createServer({ client, tokens }) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
-      if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
+      if (req.method === 'GET' && url.pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: true, installed: Boolean(tokens.load()?.access_token) }));
+      }
+      // Корень отвечает 200 для healthcheck платформы и подсказывает, как открыть приложение.
+      if (req.method === 'GET' && APP_PATHS.has(url.pathname)) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end('<!doctype html><meta charset="utf-8"><title>SKU Sync</title>' +
+          '<p style="font:15px system-ui;margin:24px">SKU Sync работает. Откройте приложение из меню Битрикс24 ' +
+          `(${esc(config.domain)}), чтобы настроить каталог.</p>`);
       }
 
       if (req.method !== 'POST') {
@@ -162,27 +174,6 @@ export function createServer({ client, tokens }) {
       }
       const raw = await readBody(req);
       const body = parse(req, raw);
-
-      // Установка локального приложения: Б24 открывает обработчик установки
-      // с AUTH_ID/REFRESH_ID в теле и DOMAIN/member_id в query/теле.
-      if (url.pathname === '/install') {
-        if (!(await saveAuth(body, tokens))) {
-          res.writeHead(400);
-          return res.end('No valid auth data');
-        }
-        let status = 'ok';
-        try {
-          await bindEvent(client);
-        } catch (e) {
-          status = e.message;
-          log('Ошибка event.bind:', e.message);
-        }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(`<!doctype html><html><head><meta charset="utf-8">
-<script src="//api.bitrix24.com/api/v1/"></script></head><body>
-<p>SKU-синхронизация: ${status === 'ok' ? 'установлено, подписка на OnCrmDealUpdate создана' : 'ошибка: ' + status.replace(/</g, '&lt;')}</p>
-<script>BX24.init(function(){ BX24.installFinish(); });</script></body></html>`);
-      }
 
       // Сохранение настроек со страницы приложения. Только для администраторов портала.
       if (url.pathname === '/settings') {
@@ -223,18 +214,35 @@ export function createServer({ client, tokens }) {
         return html(await settingsPage(client, { authId, settings, message, error }));
       }
 
-      if (url.pathname === '/handler') {
+      if (APP_PATHS.has(url.pathname)) {
         const event = String(body.event || '').toUpperCase();
         const appToken = body.auth?.application_token;
 
-        // Открытие приложения в портале: сохраняем свежие токены (после
-        // передеплоя data/ пуст — достаточно открыть приложение в Б24).
-        if (!event && body.AUTH_ID) {
-          const ok = await saveAuth(body, tokens);
-          res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' });
-          return res.end(ok
-            ? await settingsPage(client, { authId: body.AUTH_ID, settings: await getSettings(client, config) })
-            : 'No valid auth data');
+        // Установка или открытие приложения в портале (Б24 может открыть любой из путей
+        // приложения). Сохраняем свежие токены — после передеплоя data/ пуст — и
+        // убеждаемся, что подписка на OnCrmDealUpdate есть.
+        const authId = body.AUTH_ID || (!event && body.auth?.access_token);
+        if (!event && authId) {
+          const info = await saveAuth(body, tokens);
+          if (!info) {
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            return res.end('No valid auth data');
+          }
+          let error = '';
+          try {
+            await bindEvent(client);
+          } catch (e) {
+            log('Ошибка event.bind:', e.message);
+            error = `Не удалось подписаться на изменения сделок: ${e.message}`;
+          }
+          const finishInstall = url.pathname === '/install' || info.INSTALLED === false;
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(await settingsPage(client, {
+            authId,
+            settings: await getSettings(client, config),
+            error,
+            finishInstall,
+          }));
         }
 
         // ONAPPINSTALL приходит с application_token — запоминаем его для проверки событий.
