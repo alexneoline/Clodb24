@@ -54,8 +54,8 @@ test('syncDeal подставляет PRODUCT_ID и сохраняет оста�
   assert.equal(s.updated, true);
   assert.deepEqual(s.notFound, ['SKU-404']);
   assert.equal(s.changed.length, 2);
-  // Кэш: каталог запрошен один раз на уникальный артикул
-  assert.equal(client.calls.filter((c) => c.method === 'catalog.product.list').length, 2);
+  // Кэш: повторный SKU-100 не запрашивается; SKU-404 ищется с префиксом и без
+  assert.equal(client.calls.filter((c) => c.method === 'catalog.product.list').length, 3);
 
   const set = client.calls.find((c) => c.method === 'crm.deal.productrows.set');
   assert.equal(set.params.id, 7);
@@ -132,7 +132,7 @@ test('settingsPage показывает каталоги и свойства с 
     settings: { catalogIblockIds: [14], skuField: 'property105' },
   });
   assert.match(html, /name="iblock" value="14" checked/);
-  assert.match(html, /<option value="property105" selected>Артикул \(ARTNUMBER\)<\/option>/);
+  assert.match(html, /<option value="property105" selected>Артикул \(ARTNUMBER\) — ID 105<\/option>/);
   assert.match(html, /name="AUTH_ID" value="tok"/);
 });
 
@@ -244,11 +244,22 @@ test('settingsPage скрывает нестроковые свойства и �
   };
   const html = await settingsPage(client, { authId: 't', settings: { catalogIblockIds: [], skuField: '' } });
   assert.doesNotMatch(html, /MORE_PHOTO/);
-  assert.match(html, /<option value="property110" selected>Артикул \(ARTNUMBER\)<\/option>/);
+  assert.match(html, /<option value="property110" selected>Артикул \(ARTNUMBER\) — ID 110<\/option>/);
 
   const none = await settingsPage({ async call(m) {
     if (m === 'catalog.catalog.list') return { catalogs: [{ iblockId: 25, name: 'CRM' }] };
     return { productProperties: [{ id: 7, name: 'Бренд', code: 'BRAND', propertyType: 'S' }] };
   } }, { authId: 't', settings: { catalogIblockIds: [], skuField: '' } });
   assert.match(none, /<option value="" selected disabled>— выберите поле —<\/option>/);
+});
+
+test('поиск по артикулу пробует значение без префикса SKU-', async () => {
+  const { skuCandidates } = await import('../src/dealSync.js');
+  assert.deepEqual(skuCandidates('SKU-8808060009108'), ['SKU-8808060009108', '8808060009108']);
+  assert.deepEqual(skuCandidates('8808060009108'), ['8808060009108']);
+
+  const rows = [{ PRODUCT_ID: 0, PRODUCT_NAME: 'Neoline Shadow Wi-Fi [SKU-8808060009108]', PRICE: 1, QUANTITY: 1 }];
+  const client = mockClient(rows, { '8808060009108': 545439 });
+  const s = await syncDeal(client, config, 5);
+  assert.deepEqual(s.changed, [{ index: 0, sku: 'SKU-8808060009108', from: 0, to: 545439 }]);
 });

@@ -117,7 +117,7 @@ export async function settingsPage(client, { authId, settings, message = '', err
 ${esc(c.name)} <small>(ID ${esc(c.iblockId)}${c.productIblockId ? ', торговые предложения' : ''})</small></label>`).join('<br>');
   const propGroups = catalogs.map((c) => c.properties.length
     ? `<optgroup label="Свойства: ${esc(c.name)}">${c.properties.map((p) =>
-        opt(`property${p.id}`, `${p.name}${p.code ? ` (${p.code})` : ''}`)).join('')}</optgroup>`
+        opt(`property${p.id}`, `${p.name}${p.code ? ` (${p.code})` : ''} — ID ${p.id}`)).join('')}</optgroup>`
     : '').join('');
   const known = !skuField
     || catalogs.some((c) => c.properties.some((p) => `property${p.id}` === skuField))

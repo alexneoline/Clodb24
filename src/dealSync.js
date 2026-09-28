@@ -14,16 +14,25 @@ export function toSetRow(row) {
   return out;
 }
 
+// Варианты значения для поиска: как в названии («SKU-8808060009108») и без префикса
+// («8808060009108») — в каталоге артикул часто хранится без «SKU-».
+export function skuCandidates(sku) {
+  const bare = String(sku).replace(/^SKU-/i, '');
+  return bare && bare !== sku ? [sku, bare] : [sku];
+}
+
 export async function findProductIdBySku(client, config, sku) {
   if (!config.skuField) return null;
-  for (const iblockId of config.catalogIblockIds) {
-    const result = await client.call('catalog.product.list', {
-      select: ['id', 'iblockId', 'name'],
-      filter: { iblockId, [config.skuField]: sku },
-      order: { id: 'asc' },
-    });
-    const product = result?.products?.[0];
-    if (product) return Number(product.id);
+  for (const value of skuCandidates(sku)) {
+    for (const iblockId of config.catalogIblockIds) {
+      const result = await client.call('catalog.product.list', {
+        select: ['id', 'iblockId', 'name'],
+        filter: { iblockId, [config.skuField]: value },
+        order: { id: 'asc' },
+      });
+      const product = result?.products?.[0];
+      if (product) return Number(product.id);
+    }
   }
   return null;
 }
